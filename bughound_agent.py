@@ -1,3 +1,4 @@
+import ast #rec by claude
 import json
 import os
 import re
@@ -26,6 +27,8 @@ class BugHoundAgent:
     4) TEST: run simple reliability checks
     5) REFLECT: decide whether to apply the fix automatically
     """
+
+    MAX_FIX_RETRIES = 2
 
     def __init__(self, client: Optional[Any] = None):
         # client should implement: complete(system_prompt: str, user_prompt: str) -> str
@@ -107,20 +110,38 @@ class BugHoundAgent:
         user_template = _load_prompt("fixer_user.txt")
         user_prompt = user_template.replace("{{ISSUES}}", json.dumps(issues)).replace("{{CODE}}", code_snippet)
 
-        # UPDATED: Added exception handling for API errors/rate limits
-        try:
-            raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
-        except Exception as e:
-            self._log("ACT", f"API Error: {str(e)}. Falling back to heuristic fixer.")
-            return self._heuristic_fix(code_snippet, issues)
+        # 1 initial attempt + up to MAX_FIX_RETRIES corrective retries
+        for attempt in range(self.MAX_FIX_RETRIES + 1):
+            # UPDATED: Added exception handling for API errors/rate limits
+            try:
+                raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
+            except Exception as e:
+                self._log("ACT", f"API Error: {str(e)}. Falling back to heuristic fixer.")
+                return self._heuristic_fix(code_snippet, issues)
 
-        cleaned = self._strip_code_fences(raw).strip()
+            cleaned = self._strip_code_fences(raw).strip()
 
-        if not cleaned:
-            self._log("ACT", "LLM returned empty output. Falling back to heuristic fixer.")
-            return self._heuristic_fix(code_snippet, issues)
+            if not cleaned:
+                self._log("ACT", "LLM returned empty output. Falling back to heuristic fixer.")
+                return self._heuristic_fix(code_snippet, issues)
 
-        return cleaned
+            try:
+                ast.parse(cleaned)  # Raises SyntaxError for invalid Python, prose, or truncation
+                return cleaned
+            except SyntaxError as e:
+                if attempt < self.MAX_FIX_RETRIES:
+                    self._log("ACT", f"LLM returned invalid Python ({e}). Retrying with correction (retry {attempt + 1}/{self.MAX_FIX_RETRIES}).")
+                    # Show the model its own bad output and the exact error so it can correct it
+                    user_prompt = (
+                        user_template.replace("{{ISSUES}}", json.dumps(issues)).replace("{{CODE}}", code_snippet)
+                        + "\n\nYour previous response was NOT valid Python and failed to parse with this error:\n"
+                        + f"{e}\n\nPrevious response:\n{cleaned}\n\n"
+                        + "Return ONLY the complete, valid Python source. No prose, no markdown, no backticks."
+                    )
+                else:
+                    self._log("ACT", f"LLM returned invalid Python ({e}) after {self.MAX_FIX_RETRIES} retries. Falling back to heuristic fixer.")
+
+        return self._heuristic_fix(code_snippet, issues)
 
     # ----------------------------
     # Heuristic analyzer/fixer
