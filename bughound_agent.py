@@ -2,6 +2,7 @@ import ast #rec by claude
 import json
 import os
 import re
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from reliability.risk_assessor import assess_risk
@@ -29,6 +30,17 @@ class BugHoundAgent:
     """
 
     MAX_FIX_RETRIES = 2
+    MAX_CODE_CHARS = 20_000
+    MAX_ISSUES = 20
+
+    # Log-only: instruction-like text in the input. Code comments legitimately contain imperatives,
+    # so this is a signal in the trace, never a reason to block.
+    _SUSPICIOUS_INPUT = re.compile(
+        r"(ignore|disregard|forget)\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\s+(instructions|rules|prompts?)"
+        r"|return\s+(an\s+)?empty\s+(json\s+)?array"
+        r"|system\s+prompt",
+        re.IGNORECASE,
+    )
 
     def __init__(self, client: Optional[Any] = None):
         # client should implement: complete(system_prompt: str, user_prompt: str) -> str
@@ -41,6 +53,18 @@ class BugHoundAgent:
     def run(self, code_snippet: str) -> Dict[str, Any]:
         self.logs = []
         self._log("PLAN", "Planning a quick scan + fix proposal workflow.")
+
+        code_snippet = code_snippet.replace("\x00", "")
+        if len(code_snippet) > self.MAX_CODE_CHARS:
+            self._log("INPUT", f"Input is {len(code_snippet)} chars (limit {self.MAX_CODE_CHARS}). Skipping analysis and fix.")
+            return {
+                "issues": [],
+                "fixed_code": "",
+                "risk": assess_risk(original_code=code_snippet, fixed_code="", issues=[]),
+                "logs": self.logs,
+            }
+        if self._SUSPICIOUS_INPUT.search(code_snippet):
+            self._log("INPUT", "Input contains instruction-like text. It is passed to the model as data only; review results carefully.")
 
         issues = self.analyze(code_snippet)
         self._log("ANALYZE", f"Found {len(issues)} issue(s).")
@@ -77,7 +101,7 @@ class BugHoundAgent:
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("analyzer_system.txt")
         user_template = _load_prompt("analyzer_user.txt")
-        user_prompt = user_template.replace("{{CODE}}", code_snippet)
+        user_prompt = self._render(user_template, CODE=self._wrap_code(code_snippet))
 
         # UPDATED: Added exception handling for API errors/rate limits
         try:
@@ -91,6 +115,14 @@ class BugHoundAgent:
         if issues is None:
             self._log("ANALYZE", "LLM output was not parseable JSON. Falling back to heuristics.")
             return self._heuristic_analyze(code_snippet)
+
+        if not issues:
+            # An empty array is the easiest result to get wrong (or to induce via injected text in the code),
+            # so cross-check it against the deterministic rules before trusting it.
+            cross_check = self._heuristic_analyze(code_snippet)
+            if cross_check:
+                self._log("ANALYZE", f"LLM reported no issues but the heuristic cross-check found {len(cross_check)}. Using those.")
+                return cross_check
 
         return issues
 
@@ -108,7 +140,8 @@ class BugHoundAgent:
         # Load prompt templates from prompts/ folder
         system_prompt = _load_prompt("fixer_system.txt")
         user_template = _load_prompt("fixer_user.txt")
-        user_prompt = user_template.replace("{{ISSUES}}", json.dumps(issues)).replace("{{CODE}}", code_snippet)
+        base_prompt = self._render(user_template, ISSUES=json.dumps(issues), CODE=self._wrap_code(code_snippet))
+        user_prompt = base_prompt
 
         # 1 initial attempt + up to MAX_FIX_RETRIES corrective retries
         for attempt in range(self.MAX_FIX_RETRIES + 1):
@@ -197,30 +230,46 @@ class BugHoundAgent:
     def _parse_json_array_of_issues(self, text: str) -> Optional[List[Dict[str, str]]]:
         text = text.strip()
         parsed = self._try_json_loads(text)
-        if isinstance(parsed, list):
-            return self._normalize_issues(parsed)
+        if not isinstance(parsed, list):
+            array_str = self._extract_first_json_array(text)
+            parsed = self._try_json_loads(array_str) if array_str else None
+        if not isinstance(parsed, list):
+            return None
 
-        array_str = self._extract_first_json_array(text)
-        if array_str:
-            parsed2 = self._try_json_loads(array_str)
-            if isinstance(parsed2, list):
-                return self._normalize_issues(parsed2)
-
-        return None
+        issues = self._normalize_issues(parsed)
+        if parsed and not issues:
+            # Non-empty array where every item was malformed: unparseable, not "no issues".
+            return None
+        return issues
 
     def _normalize_issues(self, arr: List[Any]) -> List[Dict[str, str]]:
         issues: List[Dict[str, str]] = []
         for item in arr:
             if not isinstance(item, dict):
                 continue
+            msg = str(item.get("msg", "")).strip()
+            if not msg:
+                continue
             issues.append(
                 {
                     "type": str(item.get("type", "Issue")),
                     "severity": str(item.get("severity", "Unknown")),
-                    "msg": str(item.get("msg", "")).strip(),
+                    "msg": msg,
                 }
             )
-        return issues
+        return issues[: self.MAX_ISSUES]
+
+    def _wrap_code(self, code: str) -> str:
+        """Fence untrusted code in a tag with a random suffix so it can't contain its own closing tag."""
+        while True:
+            tag = f"code_{secrets.token_hex(4)}"
+            if tag not in code:
+                return f"<{tag}>\n{code}\n</{tag}>"
+
+    @staticmethod
+    def _render(template: str, **values: str) -> str:
+        """Single-pass {{KEY}} substitution, so substituted text is never re-scanned for placeholders."""
+        return re.sub(r"\{\{(\w+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
     def _try_json_loads(self, s: str) -> Any:
         try:
