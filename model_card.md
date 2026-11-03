@@ -1,8 +1,7 @@
 # BugHound Mini Model Card (Reflection)
 
-Fill this out after you run BugHound in **both** modes (Heuristic and Gemini).
 
----
+
 
 ## 1) What is this system?
 
@@ -79,15 +78,17 @@ Fill this out after you run BugHound in **both** modes (Heuristic and Gemini).
 
 List at least **two** reliability rules currently used in `assess_risk`. For each:
 
-- What does the rule check?
-- Why might that check matter for safety or correctness?
-- What is a false positive this rule could cause?
-- What is a false negative this rule could miss?
+Fixed_Code Exist
+- What does the rule check?: Checks that the LLM returned a fixed code, else it would give a high level of risk and mention that no fix was made
+- Why might that check matter for safety or correctness?: Ensures that legitimate code refactors are assessed on
+- What is a false positive this rule could cause?: If code is required to be entered, then code must be outputted
+- What is a false negative this rule could miss?: Perhaps an empty list or meaningless that passes the existence check but doesn't help w/ functionality at all
 
-- What does the rule check?
-- Why might that check matter for safety or correctness?
-- What is a false positive this rule could cause?
-- What is a false negative this rule could miss?
+Issue severity based risk
+- What does the rule check?: How risky a code issue is.
+- Why might that check matter for safety or correctness? Ensures how much trust we should give to an LLM in correcting code vs if human review is needed
+- What is a false positive this rule could cause?: The issue severity scoring could be too strict and mark a low risk code issue as high risk.
+- What is a false negative this rule could miss?: The issue severity scoring could be too loose and mark a high risk code issue as low.
 
 ---
 
@@ -95,10 +96,16 @@ List at least **two** reliability rules currently used in `assess_risk`. For eac
 
 Provide at least **two** examples:
 
-1. A time BugHound missed an issue it should have caught  
+1. A time BugHound missed an issue it should have caught
+
+It didn't catch jail breaking attempt in the TODO comments because the phrasing was not expected by the regex
+ 
+
 2. A time BugHound suggested a fix that felt risky, wrong, or unnecessary  
 
-For each, include the snippet (or describe it) and what went wrong.
+For print_spam code, BugHound only returned True despite the dev intention to test a function was passed thru. It could have recommended one logging vs no print statements at all.
+
+
 
 ---
 
@@ -107,9 +114,13 @@ For each, include the snippet (or describe it) and what went wrong.
 Compare behavior across the two modes:
 
 - What did Gemini detect that heuristics did not?
+    - more nuances in code refactors rather than printing / logging statements
 - What did heuristics catch consistently?
+    -  printing / logging statements
 - How did the proposed fixes differ?
+    - Gemini was a little non deterministic while heuristic was more predictable
 - Did the risk scorer agree with your intuition?
+    - Sometimes
 
 ---
 
@@ -118,8 +129,11 @@ Compare behavior across the two modes:
 Describe one scenario where BugHound should **refuse** to auto-fix and require human review.
 
 - What trigger would you add?
+   - Where there's attempts of jailbreaking
 - Where would you implement it (risk_assessor vs agent workflow vs UI)?
+    - risk_assessor
 - What message should the tool show the user?
+    - Jail breaking suspected. Please review your code inputted carefully. All suspicious code will be flagged and their inputters on watch.
 
 ---
 
@@ -134,4 +148,5 @@ Examples:
 - A more careful “minimal diff” policy
 - Better detection of changes that alter behavior
 
-Write your idea clearly and briefly.
+
+A stronger guard rail that can catch more jail breaking attempts or system abuses no matter the arrangment or variety of words as long as it captures any bad user's intention. 
