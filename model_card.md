@@ -15,8 +15,32 @@ Fill this out after you run BugHound in **both** modes (Heuristic and Gemini).
 
 ## 2) How does it work?
 
-Describe the workflow in your own words (plan → analyze → act → test → reflect).  
-Include what is done by heuristics vs what is done by Gemini (if enabled).
+- **PLAN** → run() where self.log is updated on each of the workflow steps of the Bug Hound agent as it processed the entered code.
+
+- **ANALYZE** → analyze(): the user’s function / code is passed to the LLM along with the system prompt and user template
+    - If there is no client, an API error occurs, or the output isn't parseable JSON, it falls back to _heuristic_analyze.
+    - The heuristics check only for print(, a bare except:, and TODO
+    - Heuristics = runs w/o api
+
+- **ACT** → propose_fix() if there were issues found, BugHound  calls the LLM with the issues JSON and the code and retrieve the LLM’s revised code 
+    - Fallbacks go to _heuristic_fix on an API error or an empty reply. Without a client it uses _heuristic_fix directly.
+
+- **TEST** → assess_risk(),
+    - Takes in original_code (str), fixed_code (str) and issues (a list of dicts
+    - Outputs a list of dictionaries consisting of:
+        - score: int from 0 to 100
+        - Severity level: "low" | "medium" | "high"
+            - Severity is based on the original submitted code reasons: list of strings explaining deductions
+        - should_autofix: bool
+
+- **REFLECT:** 
+    - Considers if the revised code is safe enough to apply, based on the boolean results “should_autofix var” from assess_risk()
+
+
+**Heuristics vs. Gemini:**
+- Heuristics runs if there’s no api key or LLM available
+- Falls back from Gemini to Heuristics if the LLM returns an empty output
+
 
 ---
 
@@ -24,20 +48,41 @@ Include what is done by heuristics vs what is done by Gemini (if enabled).
 
 **Inputs:**
 
-- What kind of code snippets did you try?
-- What was the “shape” of the input (short scripts, functions, try/except blocks, etc.)?
+    print_spam.py (simple function w/ repetitive print statements
+    ```
+        def greet(name):
+            print("Hello", name)
+            print("Welcome!")
+            return True
+    ```
 
 **Outputs:**
 
 - What types of issues were detected?
+    - 1. Maintainability | Low (Use of print statements in non-demo code.)
 - What kinds of fixes were proposed?
+    - 
+        ``` 
+            def greet(name):
+               return True
+
+        ```
 - What did the risk report show?
+    - Risk Level: Low
+    - Score 95
+    - Auto-fix: YES
+    - Reasons: Low severity issue detected.
 
 ---
 
 ## 4) Reliability and safety rules
 
 List at least **two** reliability rules currently used in `assess_risk`. For each:
+
+- What does the rule check?
+- Why might that check matter for safety or correctness?
+- What is a false positive this rule could cause?
+- What is a false negative this rule could miss?
 
 - What does the rule check?
 - Why might that check matter for safety or correctness?
